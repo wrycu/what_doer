@@ -134,8 +134,14 @@ worker.webhook("onIncomingBoardGame", {
 			await notion.pages.update({
 				page_id: page_id,
 				properties: {
-					"Player Count": {
-					  	rich_text: [{ text: { content: `${details["players"]["min"].toString()} - ${details["players"]["max"].toString()}` } }],
+					"Min": {
+					  	number: parseInt(details["players"]["min"]),
+					},
+					"Max": {
+					  	number: parseInt(details["players"]["max"]),
+					},
+					"Rating": {
+					  	number: parseFloat(parseFloat(details["rating"]).toFixed(2)),
 					},
 				},
 			});
