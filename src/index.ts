@@ -4,6 +4,7 @@ import { j } from "@notionhq/workers/schema-builder";
 
 import { parseMovieNameAndYear, tvdbGetMovieInfo } from "./movie";
 import {find_game, get_game_details} from "./game";
+import {getAuthToken, searchVideoGame} from "./videogame";
 
 const worker = new Worker();
 export default worker;
@@ -151,6 +152,52 @@ worker.webhook("onIncomingBoardGame", {
 					cover: {
 						type: "external",
 						external: {url: details["image"]}
+					},
+				});
+			}
+		}
+	}
+});
+
+worker.webhook("onIncomingVideoGame", {
+	title: "Incoming Video Game Data Webhook",
+	description: "Receives a video game edit event and pulls IGDB data about it",
+	execute: async (events, context) => {
+		const notionToken = process.env.API_TOKEN;
+		const igdb_token = process.env.IGDB_TOKEN || "";
+		const notion = new Client({auth: notionToken});
+		for (const event of events) {
+			//console.log(JSON.stringify(event.body, null, 2))
+			const body = event.body; // local var helps TS narrow reliably
+
+			if (!isNotionDbPageEventBody(body)) continue;
+
+			const name = getNameTitle(body) || "";
+			const page_id = (event.body.data as { id: string }).id;
+			const game_name = name;
+			const auth_token = await getAuthToken(igdb_token);
+
+			const details = await searchVideoGame(auth_token, game_name);
+			console.log(details);
+			if (!details) {
+				throw new Error("Unable to locate game details!");
+			}
+
+			if (details["icon"]) {
+				await notion.pages.update({
+					page_id: page_id,
+					icon: {
+						type: "external",
+						external: {url: details["icon"]}
+					},
+				});
+			}
+			if (details["cover"]) {
+				await notion.pages.update({
+					page_id: page_id,
+					cover: {
+						type: "external",
+						external: {url: details["cover"]}
 					},
 				});
 			}
