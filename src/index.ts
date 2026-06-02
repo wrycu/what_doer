@@ -5,6 +5,7 @@ import { j } from "@notionhq/workers/schema-builder";
 import { parseMovieNameAndYear, tvdbGetMovieInfo } from "./movie";
 import {find_game, get_game_details} from "./game";
 import {getAuthToken, searchVideoGame} from "./videogame";
+import { get_voice_users, get_discord_ids, update_attendance_status, ATTENDANCE_PAGE_ID } from "./user_sync";
 
 const worker = new Worker();
 export default worker;
@@ -157,6 +158,25 @@ worker.webhook("onIncomingBoardGame", {
 			}
 		}
 	}
+});
+
+// Schedule: Saturdays 10:00AM and 10:02AM Pacific
+// Cron entries (add via `crontab -e`):
+//   TZ=America/Los_Angeles
+//   0 10 * * 6 ntn workers exec attendanceSync
+//   2 10 * * 6 ntn workers exec attendanceSync
+worker.tool("attendanceSync", {
+	title: "Attendance Sync",
+	description: "Checks who is in the Discord voice channel and marks them as present in Notion.",
+	schema: j.object({}),
+	execute: async (_input, { notion }) => {
+		const [voice_users, discord_id_map] = await Promise.all([
+			get_voice_users(),
+			get_discord_ids(notion, ATTENDANCE_PAGE_ID),
+		]);
+		await update_attendance_status(notion, ATTENDANCE_PAGE_ID, voice_users, discord_id_map);
+		return `Updated attendance for ${discord_id_map.size} users; ${voice_users.length} in voice.`;
+	},
 });
 
 worker.webhook("onIncomingVideoGame", {
