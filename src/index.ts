@@ -1,11 +1,14 @@
 import {Worker} from "@notionhq/workers";
 import { Client } from "@notionhq/client";
 import { j } from "@notionhq/workers/schema-builder";
+import * as Schema from "@notionhq/workers/schema";
+import * as Builder from "@notionhq/workers/builder";
 
 import { parseMovieNameAndYear, tvdbGetMovieInfo } from "./movie";
 import {find_game, get_game_details} from "./game";
 import {getAuthToken, searchVideoGame} from "./videogame";
 import { get_voice_users, get_discord_ids, update_attendance_status, ATTENDANCE_PAGE_ID } from "./user_sync";
+import { getSteamLibrary, getStoreDetails, getGameCoverUrl, getGameIconUrl, minutesToHours, STEAM_BATCH_SIZE, SteamGame } from "./steam";
 
 const worker = new Worker();
 export default worker;
@@ -176,6 +179,82 @@ worker.tool("attendanceSync", {
 		]);
 		await update_attendance_status(notion, ATTENDANCE_PAGE_ID, voice_users, discord_id_map);
 		return `Updated attendance for ${discord_id_map.size} users; ${voice_users.length} in voice.`;
+	},
+});
+
+// Steam library sync
+const steamGames = worker.database("steamGames", {
+	type: "managed",
+	initialTitle: "Steam Library",
+	primaryKeyProperty: "App ID",
+	schema: {
+		properties: {
+			Name: Schema.title(),
+			"App ID": Schema.richText(),
+			"Total Playtime (hrs)": Schema.number(),
+			"Recent Playtime (hrs)": Schema.number(),
+			"Last Played": Schema.date(),
+			Genres: Schema.richText(),
+			Metacritic: Schema.number(),
+			"Release Date": Schema.date(),
+			Cover: Schema.richText(),
+			Icon: Schema.richText(),
+		},
+	},
+});
+
+const steamApi = worker.pacer("steamApi", { allowedRequests: 1, intervalMs: 1000 });
+// Steam Store API: unauthenticated, informal limit ~200 req/5min; 1 req/1.5s stays comfortably under.
+const steamStore = worker.pacer("steamStore", { allowedRequests: 1, intervalMs: 1500 });
+
+type SteamSyncState = { offset: number };
+
+worker.sync("steamLibrarySync", {
+	database: steamGames,
+	mode: "replace",
+	schedule: "1d",
+	execute: async (state: SteamSyncState | null | undefined) => {
+		const offset = state?.offset ?? 0;
+
+		await steamApi.wait();
+		const apiKey = process.env.STEAM_API_KEY ?? "";
+		const steamId = process.env.STEAM_ID ?? "";
+		const games = await getSteamLibrary(apiKey, steamId);
+
+		const batch = games.slice(offset, offset + STEAM_BATCH_SIZE);
+		const hasMore = offset + STEAM_BATCH_SIZE < games.length;
+
+		const changes = [];
+		for (const game of batch) {
+			await steamStore.wait();
+			const store = await getStoreDetails(game.appid);
+			// Steam uses 86400 (Jan 2 1970) as a sentinel for "played before tracking existed"
+			const lastPlayedDate = game.rtime_last_played > 86400
+				? new Date(game.rtime_last_played * 1000).toISOString().split("T")[0]
+				: null;
+			changes.push({
+				type: "upsert" as const,
+				key: String(game.appid),
+				properties: {
+					Name: Builder.title(game.name),
+					"App ID": Builder.richText(String(game.appid)),
+					"Total Playtime (hrs)": Builder.number(minutesToHours(game.playtime_forever)),
+					"Recent Playtime (hrs)": Builder.number(minutesToHours(game.playtime_2weeks ?? 0)),
+					...(lastPlayedDate ? { "Last Played": Builder.date(lastPlayedDate) } : {}),
+					...(store.genres.length ? { Genres: Builder.richText(store.genres.join(", ")) } : {}),
+					...(store.metacritic !== null ? { Metacritic: Builder.number(store.metacritic) } : {}),
+					...(store.releaseDate ? { "Release Date": Builder.date(store.releaseDate) } : {}),
+					Cover: Builder.richText(getGameCoverUrl(game.appid)),
+					...(game.img_icon_url ? { Icon: Builder.richText(getGameIconUrl(game.appid, game.img_icon_url)) } : {}),
+				},
+			});
+		}
+
+		return {
+			changes,
+			hasMore,
+			nextState: hasMore ? { offset: offset + STEAM_BATCH_SIZE } : undefined,
+		};
 	},
 });
 
